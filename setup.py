@@ -20,9 +20,9 @@ from Cython.Distutils import build_ext
 setup(
     cmdclass = {'build_ext': build_ext},
     ext_modules = [
-        Extension("_aio", 
-            ["aio.pyx"],
-            libraries=["aio"]
+        Extension("_portpoll", 
+            ["portpoll.pyx"],
+#            libraries=[""]
         )
     ]
 )
