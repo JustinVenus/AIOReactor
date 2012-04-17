@@ -23,7 +23,7 @@ Interface to port I/O event notification facility.
 #   this is really bothering me as I see know indication on why that
 #   would matter.  A segv should happen reguardless if there is a
 #   memory error somewhere.
-import time
+import time as _time
 
 cdef extern from "sys/time.h":
     cdef struct timespec:
@@ -53,6 +53,9 @@ cdef extern from "port.h":
     enum: PORT_SOURCE_ALERT # unitptr_t/unsigned int
     enum: PORT_SOURCE_FILE  # file_obj_t
 
+    # actually defined in "sys/siginfo.h"
+    enum: SIGEV_PORT #For AIO support
+
     cdef extern int port_create()
 
     # actually defined in "sys/port.h"
@@ -62,6 +65,10 @@ cdef extern from "port.h":
         unsigned short  portev_pad     # port internal use
         unsigned int    portev_object  # source specific object
         void            *portev_user   # user cookie
+
+    ctypedef struct  port_notify:
+        int             portnfy_port   # bind request(s) to port
+        void            *portnfy_user  # user defined
 
     # man -s 3C port_get
     cdef extern int port_get(
@@ -99,17 +106,14 @@ cdef extern from "Python.h":
 
 # NOTE: This was only used during intial development
 #   and it can probably be removed in the future.
-
-DEF DEBUG = 1
 cdef extern void debug(object message):
     """debug message printer"""
-    IF DEBUG == 0: return
     msg = "<<DEBUG>> " + str(message) + "\n"
     cdef char *output
     output = <bytes>msg
     printf(output)
 
-cdef class port:
+cdef class portpoll:
     """
     Represent a set of file descriptors being monitored for events.
 
@@ -125,13 +129,11 @@ cdef class port:
         if self.fd == -1:
             raise IOError(errno, strerror(errno))
         self.initialized = 1
-        debug("port initialized")
 
     def __dealloc__(self):
         if self.initialized:
             close(self.fd)
             self.initialized = 0
-        debug("port deallocated")
 
     def close(self):
         """
@@ -141,7 +143,6 @@ cdef class port:
             if close(self.fd) == -1:
                 raise IOError(errno, strerror(errno))
             self.initialized = 0
-            debug("port closed")
 
     def fileno(self):
         """
@@ -149,63 +150,50 @@ cdef class port:
         """
         return self.fd
 
-    def add(self, int src, int fd, int events, object uobject=None):
+    def add(self, int fd, int events, int src=PORT_SOURCE_FD):
         """
         Monitor a particular file descriptor's state.
         
         Wrap port_associate(3C).
 
-        @type src: C{int}
-        @param src: One of PORT_FD, PORT_AIO, PORT_MQ, PORT_TIMER,
-          PORT_USER, PORT_ALERT, or PORT_FILE.
+        Note: You may call this multiple times with different events.
 
         @type fd: C{int}
         @param fd: File descriptor to modify
 
         @type events: C{int}
-        @param events: A bit set of POLLIN, POLLPRI, POLLOUT, POLLERR, 
-          POLLHUP, POLLNVAL, POLLNORM, POLLRDNORM, POLLWRNORM, 
-          POLLRDBAND, and POLLWRBAND.
+        @param events: A bit set of PPOLLIN, PPOLLPRI, PPOLLOUT, PPOLLERR, 
+          PPOLLHUP, PPOLLNVAL, PPOLLNORM, PPOLLRDNORM, PPOLLWRNORM, 
+          PPOLLRDBAND, and PPOLLWRBAND.
 
-        @type uobject: C{object} [default=None]
-        @param uobject: A user defined object to follow the event
+        @type src: C{int} [default = PFD]
+        @param src: One of PFD, PAIO, PMQ, PTIMER, PUSER, PALERT, or PFILE.
 
         @raise IOError: Raised if the underlying port_associate() call fails.
         """
-        debug("called ``add``")
-        cdef PyObject *user
+#TODO support AIO 
         cdef void *ud
         ud = NULL # assume None by default
-        if uobject:
-            user = <PyObject *>uobject
-            ud = <void *>user
         cdef int result
         result = port_associate(self.fd, src, fd, events, ud)
         if result == -1:
             raise IOError(errno, strerror(errno))
         return result
 
-    def remove(self, int src, int fd, int events):
+    def remove(self, int fd, int src=PORT_SOURCE_FD):
         """
         Unmonitor a particular file descriptor's state.
         
         Wrap port_dissociate(3C).
 
-        @type src: C{int}
-        @param src: One of PORT_FD, PORT_AIO, PORT_MQ, PORT_TIMER,
-          PORT_USER, PORT_ALERT, or PORT_FILE.
-
         @type fd: C{int}
         @param fd: File descriptor to modify
 
-        @type events: C{int}
-        @param events: A bit set of POLLIN, POLLPRI, POLLOUT, POLLERR, 
-          POLLHUP, POLLNVAL, POLLNORM, POLLRDNORM, POLLWRNORM, 
-          POLLRDBAND, and POLLWRBAND.
+        @type src: C{int} [default=PFD]
+        @param src: One of PFD, PAIO, PMQ, PTIMER, PUSER, PALERT, or PFILE.
 
         @raise IOError: Raised if the underlying port_dissociate() call fails.
         """
-        debug("called ``remove``")
         cdef int result
         result = port_dissociate(self.fd, src, fd)
         if result == -1:
@@ -226,7 +214,6 @@ cdef class port:
         @type return: <unsigned int>
         @return: Returns the number of pending events.
         """
-        debug("called ``peek``")
         cdef unsigned int nget = 0
         cdef int maxevents = 0
         cdef int result
@@ -281,16 +268,13 @@ cdef class port:
             return []
 
         # allocate memory based on the number of known pending events.
-        debug("allocating")
         size = sizeof(port_event_t *) * maxevents
         cdef port_event_t *_list = <port_event_t *>malloc(size)
-        debug("allocated")
 
         if _list is NULL:
             raise MemoryError()
         
         try:
-            debug("saving state")
             _save = PyEval_SaveThread()
             # so we can double check that an event was returned
             for i from 0 <= i < maxevents: 
@@ -298,7 +282,6 @@ cdef class port:
 
             result = port_getn(self.fd, _list, maxevents, &nget, &timeout)
             PyEval_RestoreThread(_save)
-            debug("state restored")
 
             if result == -1:
                 # This confusing API can return an event at the same time
@@ -307,24 +290,17 @@ cdef class port:
                 # any event, so check that portev_user was filled in.
                 if (errno != EINTR) and (errno != ETIME):
                     raise IOError(errno, strerror(errno))
-                debug("problem")
             i = 0 #reset counter
             results = []
-            debug("entering")
             for i from 0 <= i < nget:
-                debug("retrieving element %d" % i)
-                user = None # assume no user object in result
                 # by default we set this to NULL during ``add`` method
                 if _list[i].portev_user is not NULL:
                     # this means our event was not pulled as expected
                     # port_getn was probably interupted by a signal.
                     if _list[i].portev_user == <void *>-1:
-                        debug("skipping interation")
                         continue
-                    # Woot we have a python object to recover!!!
-                    user = <object>_list[i].portev_user
-                    debug(user)
-                debug("retrieving associated object %s" % str(user))
+#TODO support AIO
+#                    user = <object>_list[i].portev_user
                 # get event, source, and source specific object
                 evt = _list[i].portev_events # event type
                 src = _list[i].portev_source # source type
@@ -334,34 +310,32 @@ cdef class port:
                     obj = int(obj) # convert long to python int
 #TODO use this section for handling PORT_SOURCE_AIO in the future
 
-                # ex. (POLLIN, PORT_FD, 4, None)
-                results.append((evt, src, obj, user))
-            debug("returning")
+                #(FD, EVENT)
+                results.append((obj, evt))
             return results
         finally:
-            debug("calling free")
             free(_list)
 
 
-PORT_POLLIN = POLLIN
-PORT_POLLPRI = POLLPRI
-PORT_POLLOUT = POLLOUT
+PPOLLIN = POLLIN
+PPOLLPRI = POLLPRI
+PPOLLOUT = POLLOUT
 
-PORT_POLLERR = POLLERR   # error
-PORT_POLLHUP = POLLHUP   # hangup error
-PORT_POLLNVAL = POLLNVAL # invalid
-PORT_POLLNORM = POLLNORM
+PPOLLERR = POLLERR   # error
+PPOLLHUP = POLLHUP   # hangup error
+PPOLLNVAL = POLLNVAL # invalid
+PPOLLNORM = POLLNORM
 
-PORT_POLLRDNORM = POLLRDNORM
-PORT_POLLWRNORM = POLLWRNORM
-PORT_POLLRDBAND = POLLRDBAND
-PORT_POLLWRBAND = POLLWRBAND
+PPOLLRDNORM = POLLRDNORM
+PPOLLWRNORM = POLLWRNORM
+PPOLLRDBAND = POLLRDBAND
+PPOLLWRBAND = POLLWRBAND
 
 # potential sources
-PORT_AIO = PORT_SOURCE_AIO     # struct aiocb
-PORT_FD = PORT_SOURCE_FD       # file descriptor
-PORT_MQ = PORT_SOURCE_MQ       # mqd_t
-PORT_TIMER = PORT_SOURCE_TIMER # timer_t
-PORT_USER = PORT_SOURCE_USER   # unintptr_t/unsigned int
-PORT_ALERT = PORT_SOURCE_ALERT # unitptr_t/unsigned int
-PORT_FILE = PORT_SOURCE_FILE   # file_obj_t
+PAIO = PORT_SOURCE_AIO     # struct aiocb
+PFD = PORT_SOURCE_FD       # file descriptor
+PMQ = PORT_SOURCE_MQ       # mqd_t
+PTIMER = PORT_SOURCE_TIMER # timer_t
+PUSER = PORT_SOURCE_USER   # unintptr_t/unsigned int
+PALERT = PORT_SOURCE_ALERT # unitptr_t/unsigned int
+PFILE = PORT_SOURCE_FILE   # file_obj_t
