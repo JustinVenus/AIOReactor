@@ -8,8 +8,8 @@ An event completion port based implementation of the twisted main loop.
 To install the event loop (and you should do this before any connections,
 listeners or connectors are added)::
 
-    from twisted.internet import portpollreactor
-    portpollreactor.install()
+    from twisted.internet import evcpreactor
+    evcpreactor.install()
 """
 
 import sys
