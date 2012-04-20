@@ -59,9 +59,9 @@ class EVCPReactor(posixbase.PosixReactorBase):
     implements(IReactorFDSet)
 
     # Attributes for _PollLikeMixin
-    _POLL_DISCONNECTED = (_portpoll.PPOLLHUP | _portpoll.PPOLLERR)
-    _POLL_IN = _portpoll.PPOLLIN
-    _POLL_OUT = _portpoll.PPOLLOUT
+    _POLL_DISCONNECTED = (_evcp.PPOLLHUP | _evcp.PPOLLERR)
+    _POLL_IN = _evcp.PPOLLIN
+    _POLL_OUT = _evcp.PPOLLOUT
     _THROTTLE_AFTER = 60
 
     def __init__(self):
@@ -75,7 +75,7 @@ class EVCPReactor(posixbase.PosixReactorBase):
         # is retrieved.  The Solaris implementation hints at the maximum
         # event per port at 8192 events.  The underlying implementation supports
         # POSIX AIO, but it is not exposed to the reactor at this time.
-        self._poller = _portpoll.portpoll()
+        self._poller = _evcp.portpoll()
         self._reads = {}
         self._writes = {}
         self._selectables = {}
