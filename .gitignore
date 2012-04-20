@@ -1,6 +1,7 @@
 build
 dist
 core
+_trial_temp
 *.so
 *.c
 *.pyc

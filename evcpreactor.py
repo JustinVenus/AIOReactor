@@ -3,7 +3,7 @@
 # See LICENSE for details.
 
 """
-A portpoll() based implementation of the twisted main loop.
+An event completion port based implementation of the twisted main loop.
 
 To install the event loop (and you should do this before any connections,
 listeners or connectors are added)::
@@ -12,25 +12,26 @@ listeners or connectors are added)::
     portpollreactor.install()
 """
 
+import sys
 import errno
-
 from zope.interface import implements
 
 from twisted.internet.interfaces import IReactorFDSet
 
 from twisted.python import log
-from twisted.internet import posixbase, errno
+from twisted.internet import posixbase, error
 
 from twisted.internet.main import CONNECTION_DONE, CONNECTION_LOST
 
-from twisted.python import _portpoll
+from twisted.python import _evcp
+from twisted.internet.fdesc import setNonBlocking
 
 _NO_FILEDESC = error.ConnectionFdescWentAway('Filedescriptor went away')
 
 #FIXME for Solaris 11 twisted-trunk
 #class PortPollReactor(posixbase.PosixReactorBase, posixbase._PollLikeMixin):
 #FIXME for Solaris 11 twisted-10.1.0
-class PortPollReactor(posixbase.PosixReactorBase):
+class EVCPReactor(posixbase.PosixReactorBase):
     """
     A reactor that uses portpoll(4).
 
@@ -61,6 +62,7 @@ class PortPollReactor(posixbase.PosixReactorBase):
     _POLL_DISCONNECTED = (_portpoll.PPOLLHUP | _portpoll.PPOLLERR)
     _POLL_IN = _portpoll.PPOLLIN
     _POLL_OUT = _portpoll.PPOLLOUT
+    _THROTTLE_AFTER = 60
 
     def __init__(self):
         """
@@ -78,80 +80,80 @@ class PortPollReactor(posixbase.PosixReactorBase):
         self._writes = {}
         self._selectables = {}
         posixbase.PosixReactorBase.__init__(self)
+        self._throttle = self._THROTTLE_AFTER
+        #still segfaults on shutdown :(
+        self.addSystemEventTrigger("after", "shutdown", self.removeAll)
 
 
-    def _add(self, xer, primary, other, selectables, event):
-        """
-        Private method for adding a descriptor from the event loop.
-
-        It takes care of adding it if  new or modifying it if already added
-        for another state (read -> read/write for example).
-        """
-        fd = xer.fileno()
-        if fd not in primary:
-            self._poller.add(fd, event)
-
-            # Update our own tracking state *only* after the epoll call has
-            # succeeded.  Otherwise we may get out of sync.
-            primary[fd] = 1
-            selectables[fd] = xer
+    def __del__(self):
+        if self._poller:
+            self._poller.close()
+            del self._poller
 
 
     def addReader(self, reader):
         """
         Add a FileDescriptor for notification of data available to read.
         """
-        self._add(reader, self._reads, self._writes, self._selectables, _portpoll.PPOLLIN)
+        fd = reader.fileno()
+        setNonBlocking(fd)
+        flags = self._POLL_IN | self._POLL_DISCONNECTED
+        if fd in self._writes:
+            self._poller.remove(fd)
+            flags |= self._POLL_OUT
+        self._poller.add(fd, flags)
+        self._reads[fd] = 1
+        self._selectables[fd] = reader 
 
 
     def addWriter(self, writer):
         """
         Add a FileDescriptor for notification of data available to write.
         """
-        self._add(writer, self._writes, self._reads, self._selectables, _portpoll.PPOLLOUT)
-
-
-    def _remove(self, xer, primary, other, selectables, event):
-        """
-        Private method for removing a descriptor from the event loop.
-
-        It does the inverse job of _add, and also add a check in case of the fd
-        has gone away.
-        """
-        fd = xer.fileno()
-        if fd == -1:
-            for fd, fdes in selectables.items():
-                if xer is fdes:
-                    break
-            else:
-                return
-        if fd in primary:
-            if fd not in other:
-                del selectables[fd]
-                self._poller.remove(fd)
-            del primary[fd]
+        fd = writer.fileno()
+        setNonBlocking(fd)
+        flags = self._POLL_OUT | self._POLL_DISCONNECTED
+        if fd in self._reads:
+            self._poller.remove(fd)
+            flags |= self._POLL_IN
+        self._poller.add(fd, flags)
+        self._writes[fd] = 1
+        self._selectables[fd] = writer 
 
 
     def removeReader(self, reader):
         """
         Remove a Selectable for notification of data available to read.
         """
-        self._remove(reader, self._reads, self._writes, self._selectables)
+        fd = reader.fileno()
+        self._poller.remove(fd)
+        self._reads.pop(fd, None) 
+        if fd not in self._writes:
+            self._selectables.pop(fd, None)
+        else:
+            self.addWriter(reader)
 
 
     def removeWriter(self, writer):
         """
         Remove a Selectable for notification of data available to write.
         """
-        self._remove(writer, self._writes, self._reads, self._selectables)
+        fd = writer.fileno()
+        self._writes.pop(fd, None) 
+        self._poller.remove(fd)
+        if fd not in self._reads:
+            self._selectables.pop(fd, None)
+        else:
+            self.addReader(writer)
+
 
     def removeAll(self):
         """
         Remove all selectables, and return a list of them.
         """
         return self._removeAll(
-            [self._selectables[fd] for fd in self._reads],
-            [self._selectables[fd] for fd in self._writes])
+            [self._selectables[fd] for fd in self._reads if fd in self._selectables],
+            [self._selectables[fd] for fd in self._writes if fd in self._selectables])
 
 
     def getReaders(self):
@@ -166,22 +168,24 @@ class PortPollReactor(posixbase.PosixReactorBase):
         """
         Poll the poller for new events.
         """
-        if timeout is None:
-            timeout = -1  # Wait indefinitely.
-
         try:
             # Limit the number of events to the number of io objects we're
             # currently tracking (because that's maybe a good heuristic) and
-            # the amount of time we block to the value specified by our
-            # caller.
-            l = self._poller.poll(timeout)
+            # and always block for one second.
+            poller = self._poller.peek()
+            if poller:
+                self._throttle = self._THROTTLE_AFTER
+                l = self._poller.poll(1, poller)
+            elif self._throttle:
+                self._throttle -= 1
+                return 
+            else: #extreme penalty for having nothing to offer
+                self._throttle = self._THROTTLE_AFTER
+                l = self._poller.poll(1, len(self._selectables))
         except IOError, err:
             if err.errno == errno.EINTR:
                 return
-            # See epoll_wait(2) for documentation on the other conditions
-            # under which this can fail.  They can only be due to a serious
-            # programming error on our part, so let's just announce them
-            # loudly.
+            # fail loudly.
             raise
 
         _drdw = self._doReadOrWrite
@@ -251,12 +255,11 @@ class PortPollReactor(posixbase.PosixReactorBase):
         if why:
             self._disconnectSelectable(selectable, why, inRead)
         # We must re-associate the file descriptor for the next event
-        elif inRead:
-            del self._reads[fd]
+        elif inRead and selectable.fileno() in self._reads:
             self.addReader(selectable)
-        else:
-            del self._writes[fd]
-            self.addWriter(selelectable)
+        # We must re-associate the file descriptor for the next event
+        elif not inRead and selectable.fileno() in self._writes:
+            self.addWriter(selectable)
 
     doIteration = doPoll
 
@@ -265,10 +268,10 @@ def install():
     """
     Install the portpoll() reactor.
     """
-    p = PortPollReactor()
+    p = EVCPReactor()
     from twisted.internet.main import installReactor
     installReactor(p)
 
 
-__all__ = ["PortPollReactor", "install"]
+__all__ = ["EVCPPollReactor", "install"]
 

@@ -23,7 +23,6 @@ Interface to port I/O event notification facility.
 #   this is really bothering me as I see know indication on why that
 #   would matter.  A segv should happen reguardless if there is a
 #   memory error somewhere.
-import time as _time
 
 cdef extern from "sys/time.h":
     cdef struct timespec:
@@ -90,6 +89,7 @@ cdef extern from "errno.h":
     cdef extern char *strerror(int)
     enum: EINTR
     enum: ETIME
+    enum: ENOENT
 
 cdef extern from "stdio.h":
     cdef extern void *malloc(int)
@@ -120,19 +120,19 @@ cdef class portpoll:
     Note: There is a hard limit of 8192 monitored sources per port object.
     """
 
-    cdef int fd
+    cdef int port
     cdef int initialized
 
     def __init__(self):
         # hard max per port is 8192 monitored sources.
-        self.fd = port_create()
-        if self.fd == -1:
+        self.port = port_create()
+        if self.port == -1:
             raise IOError(errno, strerror(errno))
         self.initialized = 1
 
     def __dealloc__(self):
         if self.initialized:
-            close(self.fd)
+            close(self.port)
             self.initialized = 0
 
     def close(self):
@@ -140,7 +140,7 @@ cdef class portpoll:
         Close the port file descriptor.
         """
         if self.initialized:
-            if close(self.fd) == -1:
+            if close(self.port) == -1:
                 raise IOError(errno, strerror(errno))
             self.initialized = 0
 
@@ -148,9 +148,9 @@ cdef class portpoll:
         """
         Return the port file descriptor number.
         """
-        return self.fd
+        return self.port
 
-    def add(self, int fd, int events, int src=PORT_SOURCE_FD):
+    def add(self, int fd, int events):
         """
         Monitor a particular file descriptor's state.
         
@@ -166,21 +166,15 @@ cdef class portpoll:
           PPOLLHUP, PPOLLNVAL, PPOLLNORM, PPOLLRDNORM, PPOLLWRNORM, 
           PPOLLRDBAND, and PPOLLWRBAND.
 
-        @type src: C{int} [default = PFD]
-        @param src: One of PFD, PAIO, PMQ, PTIMER, PUSER, PALERT, or PFILE.
-
         @raise IOError: Raised if the underlying port_associate() call fails.
         """
-#TODO support AIO 
-        cdef void *ud
-        ud = NULL # assume None by default
         cdef int result
-        result = port_associate(self.fd, src, fd, events, ud)
+        result = port_associate(self.port, PORT_SOURCE_FD, fd, events, <void*>0)
         if result == -1:
             raise IOError(errno, strerror(errno))
         return result
 
-    def remove(self, int fd, int src=PORT_SOURCE_FD):
+    def remove(self, int fd):
         """
         Unmonitor a particular file descriptor's state.
         
@@ -189,18 +183,16 @@ cdef class portpoll:
         @type fd: C{int}
         @param fd: File descriptor to modify
 
-        @type src: C{int} [default=PFD]
-        @param src: One of PFD, PAIO, PMQ, PTIMER, PUSER, PALERT, or PFILE.
-
         @raise IOError: Raised if the underlying port_dissociate() call fails.
         """
         cdef int result
-        result = port_dissociate(self.fd, src, fd)
+        result = port_dissociate(self.port, PORT_SOURCE_FD, fd)
         if result == -1:
-            raise IOError(errno, strerror(errno))
+            if errno != ENOENT:
+                raise IOError(errno, strerror(errno))
         return result
 
-    cdef unsigned int _peek(self, timespec *timeout):
+    def peek(self):
         """
         A private C Method that provides the number of ready events.
 
@@ -214,6 +206,9 @@ cdef class portpoll:
         @type return: <unsigned int>
         @return: Returns the number of pending events.
         """
+#        cdef timespec timeout
+#        timeout.tv_sec = 0
+#        timeout.tv_nsec = 0
         cdef unsigned int nget = 0
         cdef int maxevents = 0
         cdef int result
@@ -223,14 +218,14 @@ cdef class portpoll:
         # The port_getn() function returns immediately but no events are
         # retrieved. So why is this important? Well it allows us to check
         # for events and break early as opposed to waiting for a timeout.
-        result = port_getn(self.fd, NULL, maxevents, &nget, timeout)
+        result = port_getn(self.port, NULL, maxevents, &nget, NULL)
         # Note: 32-bit port_getn() on Solaris 10 x86 returns large negative
         # values instead of 0 when returning immediately.
         if result == -1:
             raise IOError(errno, strerror(errno))
         return nget #number of pending results
 
-    def poll(self, unsigned int tv_sec, unsigned int tv_nsec=0):
+    def poll(self, int tv_sec, unsigned int maximum):
         """
         Poll for an I/O event, wrap port_getn(3C).  If there are no
         events pending this method will return immediately.
@@ -253,9 +248,9 @@ cdef class portpoll:
         """
         cdef timespec timeout
         timeout.tv_sec = tv_sec
-        timeout.tv_nsec = tv_nsec
+        timeout.tv_nsec = 0
         # let's see if there is anything worth waiting for
-        cdef unsigned int nget = self._peek(&timeout)
+        cdef unsigned int nget = maximum 
         # Set the max to the number we know we can get.
         cdef int maxevents = <int>nget # NOTE: hard max per port is 8192
         cdef size_t size = 0
@@ -268,11 +263,13 @@ cdef class portpoll:
             return []
 
         # allocate memory based on the number of known pending events.
+        _save = PyEval_SaveThread()
         size = sizeof(port_event_t *) * maxevents
         cdef port_event_t *_list = <port_event_t *>malloc(size)
+        PyEval_RestoreThread(_save)
 
         if _list is NULL:
-            raise MemoryError()
+            return [] #fail silently
         
         try:
             _save = PyEval_SaveThread()
@@ -280,7 +277,7 @@ cdef class portpoll:
             for i from 0 <= i < maxevents: 
                 _list[i].portev_user = <void *>-1
 
-            result = port_getn(self.fd, _list, maxevents, &nget, &timeout)
+            result = port_getn(self.port, _list, maxevents, &nget, &timeout)
             PyEval_RestoreThread(_save)
 
             if result == -1:
@@ -299,19 +296,10 @@ cdef class portpoll:
                     # port_getn was probably interupted by a signal.
                     if _list[i].portev_user == <void *>-1:
                         continue
-#TODO support AIO
-#                    user = <object>_list[i].portev_user
-                # get event, source, and source specific object
-                evt = _list[i].portev_events # event type
-                src = _list[i].portev_source # source type
-                obj = _list[i].portev_object # FD, AIO, FILE, TIMER, MQ .. etc
                 # repair filedescriptor representation
-                if src == PORT_SOURCE_FD:
-                    obj = int(obj) # convert long to python int
-#TODO use this section for handling PORT_SOURCE_AIO in the future
-
-                #(FD, EVENT)
-                results.append((obj, evt))
+                if _list[i].portev_source != PORT_SOURCE_FD:
+                    continue
+                results.append((int(_list[i].portev_object), int(_list[i].portev_events)))
             return results
         finally:
             free(_list)
