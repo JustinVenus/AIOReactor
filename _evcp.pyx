@@ -290,6 +290,9 @@ cdef class portpoll:
             i = 0 #reset counter
             results = []
             for i from 0 <= i < nget:
+                if _list[i] is NULL:
+                    debug("Result index %d is invalid")
+                    continue #<--- uh oh
                 # by default we set this to NULL during ``add`` method
                 if _list[i].portev_user is not NULL:
                     # this means our event was not pulled as expected
