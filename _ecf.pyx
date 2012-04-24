@@ -165,6 +165,9 @@ cdef class ecf:
           EPOLLHUP, EPOLLNVAL, EPOLLNORM, EPOLLRDNORM, EPOLLWRNORM, 
           EPOLLRDBAND, and EPOLLWRBAND.
 
+        @type return: C{int}
+        @return: Returns the status of the underlying call.
+
         @raise IOError: Raised if the underlying port_associate() call fails.
         """
         cdef int result
@@ -182,6 +185,9 @@ cdef class ecf:
         @type fd: C{int}
         @param fd: File descriptor to modify
 
+        @type return: C{int}
+        @return: Returns the status of the underlying call.
+
         @raise IOError: Raised if the underlying port_dissociate() call fails.
         """
         cdef int result
@@ -193,17 +199,16 @@ cdef class ecf:
 
     def peek(self):
         """
-        A private C Method that provides the number of ready events.
+        Provides the number of ready events without modifying state.
 
         Wrap port_getn(3C).
 
         Note: This does not modify/de-queue any event state.
 
-        @type timeout: <timespec *>
-        @param timeout: A required structure for the underlying api call
-
         @type return: C{long}
         @return: Returns the number of pending events.
+
+        @raise IOError: Raised if the underlying port_getn() call fails.
         """
         cdef unsigned int nget = 0
         cdef int maxevents = 0
@@ -239,6 +244,9 @@ cdef class ecf:
         @type tv_nsec: C{long} >= 0
         @param tv_nsec: Number of nanoseconds to wait for poll
 
+        @type return: C{list}
+        @return: Returns a list of C{tuple} that contain the filedescriptor
+           and event type retrieved.
         
         @raise IOError: Raised if the underlying port_getn() call fails.
         """
