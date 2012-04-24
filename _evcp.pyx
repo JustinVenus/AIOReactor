@@ -18,12 +18,6 @@ Interface to port I/O event notification facility.
 # make shared use of the AIO POSIX implementation for FILE I/O based on
 # what this interface has taught me. -jvenus
 
-# FIXME for some unexplained reason, this module segfaults if the
-#   time module is not imported prior to the instantiation of ``port``.
-#   this is really bothering me as I see know indication on why that
-#   would matter.  A segv should happen reguardless if there is a
-#   memory error somewhere.
-
 cdef extern from "sys/time.h":
     cdef struct timespec:
         long tv_sec
@@ -264,7 +258,8 @@ cdef class portpoll:
 
         # allocate memory based on the number of known pending events.
         _save = PyEval_SaveThread()
-        size = sizeof(port_event_t *) * maxevents
+        #size = sizeof(port_event_t *) * maxevents
+        size = sizeof(port_event_t) * maxevents
         cdef port_event_t *_list = <port_event_t *>malloc(size)
         PyEval_RestoreThread(_save)
 
@@ -290,9 +285,6 @@ cdef class portpoll:
             i = 0 #reset counter
             results = []
             for i from 0 <= i < nget:
-                if _list[i] is NULL:
-                    debug("Result index %d is invalid")
-                    continue #<--- uh oh
                 # by default we set this to NULL during ``add`` method
                 if _list[i].portev_user is not NULL:
                     # this means our event was not pulled as expected
