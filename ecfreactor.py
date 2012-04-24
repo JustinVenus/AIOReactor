@@ -3,14 +3,31 @@
 # See LICENSE for details.
 
 """
-An event completion port based implementation of the twisted main loop.
+An Event Completion Framework based implementation of the twisted main loop.
 
 To install the event loop (and you should do this before any connections,
 listeners or connectors are added)::
 
-    from twisted.internet import evcpreactor
-    evcpreactor.install()
+    from twisted.internet import ecfreactor
+    ecfpreactor.install()
+
+@author: Justin Venus
 """
+
+
+
+################################################################################
+# At idle this reactor should use the following system resources with the web
+# demo.
+#
+# /usr/demo/twisted-python2.6/twistd -n --reactor=ecf web
+#
+################################################################################
+#
+#   PID USERNAME NLWP PRI NICE  SIZE   RES STATE    TIME    CPU COMMAND
+#  3779 jvenus      1  59    0   22M   14M sleep    0:04  0.08% twistd
+#
+################################################################################
 
 import sys
 import errno
@@ -23,7 +40,7 @@ from twisted.internet import posixbase, error
 
 from twisted.internet.main import CONNECTION_DONE, CONNECTION_LOST
 
-from twisted.python import _evcp
+from twisted.python import _ecf
 from twisted.internet.fdesc import setNonBlocking
 
 _NO_FILEDESC = error.ConnectionFdescWentAway('Filedescriptor went away')
@@ -31,9 +48,9 @@ _NO_FILEDESC = error.ConnectionFdescWentAway('Filedescriptor went away')
 #FIXME for Solaris 11 twisted-trunk
 #class PortPollReactor(posixbase.PosixReactorBase, posixbase._PollLikeMixin):
 #FIXME for Solaris 11 twisted-10.1.0
-class EVCPReactor(posixbase.PosixReactorBase):
+class ECFReactor(posixbase.PosixReactorBase):
     """
-    A reactor that uses portpoll(4).
+    A reactor that uses Event Completion Framework (ECF).
 
     @ivar _poller: A L{poll} which will be used to check for I/O
         readiness.
@@ -59,14 +76,18 @@ class EVCPReactor(posixbase.PosixReactorBase):
     implements(IReactorFDSet)
 
     # Attributes for _PollLikeMixin
-    _POLL_DISCONNECTED = (_evcp.PPOLLHUP | _evcp.PPOLLERR)
-    _POLL_IN = _evcp.PPOLLIN
-    _POLL_OUT = _evcp.PPOLLOUT
-    _THROTTLE_AFTER = 60
+    _POLL_DISCONNECTED = (_ecf.EPOLLHUP | _ecf.EPOLLERR)
+    _POLL_IN = _ecf.EPOLLIN
+    _POLL_OUT = _ecf.EPOLLOUT
+
+    _AGGRESSIVE_POLL = 8750000 # nano seconds
+    _CONSERVATIVE_POLL = 500000000 # nano seconds
+    _THROTTLE_AFTER = 115 # _AGGRESSIVE_POLL * _THROTTLE_AFTER ~= 1 second
+
 
     def __init__(self):
         """
-        Initialize portpoll object, file descriptor tracking dictionaries, and the
+        Initialize ecf object, file descriptor tracking dictionaries, and the
         base class.
         """
         # Create the poller we're going to use.  This reactor is similar to the
@@ -75,20 +96,13 @@ class EVCPReactor(posixbase.PosixReactorBase):
         # is retrieved.  The Solaris implementation hints at the maximum
         # event per port at 8192 events.  The underlying implementation supports
         # POSIX AIO, but it is not exposed to the reactor at this time.
-        self._poller = _evcp.portpoll()
+        self._poller = _ecf.ecf()
         self._reads = {}
         self._writes = {}
         self._selectables = {}
         posixbase.PosixReactorBase.__init__(self)
+        #initialize the throttle
         self._throttle = self._THROTTLE_AFTER
-        #still segfaults on shutdown :(
-        self.addSystemEventTrigger("after", "shutdown", self.removeAll)
-
-
-    def __del__(self):
-        if self._poller:
-            self._poller.close()
-            del self._poller
 
 
     def addReader(self, reader):
@@ -152,8 +166,8 @@ class EVCPReactor(posixbase.PosixReactorBase):
         Remove all selectables, and return a list of them.
         """
         return self._removeAll(
-            [self._selectables[fd] for fd in self._reads if fd in self._selectables],
-            [self._selectables[fd] for fd in self._writes if fd in self._selectables])
+            [self._selectables[fd] for fd in self._reads],
+            [self._selectables[fd] for fd in self._writes])
 
 
     def getReaders(self):
@@ -168,25 +182,29 @@ class EVCPReactor(posixbase.PosixReactorBase):
         """
         Poll the poller for new events.
         """
-        try:
-            # Limit the number of events to the number of io objects we're
-            # currently tracking (because that's maybe a good heuristic) and
-            # and always block for one second.
-            poller = self._poller.peek()
-            if poller:
-                self._throttle = self._THROTTLE_AFTER
-                l = self._poller.poll(1, poller)
-            elif self._throttle:
-                self._throttle -= 1
-                return 
-            else: #extreme penalty for having nothing to offer
-                self._throttle = self._THROTTLE_AFTER
-                l = self._poller.poll(1, len(self._selectables))
-        except IOError, err:
-            if err.errno == errno.EINTR:
-                return
-            # fail loudly.
-            raise
+        #for the time being explode loudly on failures
+
+        #I could not come up with a better way to limit the cpu
+        #usage when we have no events than what the following
+        #implementation provides. -jvenus
+
+        #see how many events may be in a ready state
+        poller = self._poller.peek()
+        if poller:
+            #reset the throttle, b/c we may have data again soon
+            self._throttle = self._THROTTLE_AFTER
+            l = self._poller.poll(1, 0, poller)
+        elif not self._throttle:
+            #the second parameter is nano seconds, so 2 polls per second
+            l = self._poller.poll(
+                0, self._CONSERVATIVE_POLL, len(self._selectables))
+        else:
+            self._throttle -= 1
+            #the second parameter is nano seconds, this was the only
+            #sane default that I could find that still allowed us to
+            #be responsive, but not completely hammer the cpu. -jvenus
+            l = self._poller.poll(
+                0, self._AGGRESSIVE_POLL, len(self._selectables))
 
         _drdw = self._doReadOrWrite
         for fd, event in l:
@@ -203,6 +221,9 @@ class EVCPReactor(posixbase.PosixReactorBase):
         fd is available for read or write, do the work and raise errors if
         necessary.
         """
+        #shamelessy borrowed from epoll implementation, with a few minor
+        #modifications so that we can re-schedule the file descriptor for
+        #the next set of events.
         why = None
         inRead = False
         if event & self._POLL_DISCONNECTED and not (event & self._POLL_IN):
@@ -266,12 +287,12 @@ class EVCPReactor(posixbase.PosixReactorBase):
 
 def install():
     """
-    Install the portpoll() reactor.
+    Install the ecf() reactor.
     """
-    p = EVCPReactor()
+    p = ECFReactor()
     from twisted.internet.main import installReactor
     installReactor(p)
 
 
-__all__ = ["EVCPPollReactor", "install"]
+__all__ = ["ECFReactor", "install"]
 

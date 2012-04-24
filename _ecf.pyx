@@ -2,9 +2,12 @@
 # See LICENSE for details.
 
 """
-Interface to port I/O event notification facility.
+Interface to the Event Completion Framework I/O notification facility.
+
+@author: Justin Venus
 """
 
+################################################################################
 # NOTE: This interface is for Solaris 10+ and more than likely you will
 # have to compile it with the official proprietary cc compiler that is
 # provided as an addon from the OS vendor's website.  If you built python
@@ -14,10 +17,10 @@ Interface to port I/O event notification facility.
 # NOTE: This was developed using Cython-0.15.1. -jvenus
 
 # TODO: Discuss implementation of POSIX AIO with the twisted community.
-# I have some ideas on how epoll, kqueue, and portpoll reactors could
+# I have some ideas on how epoll, kqueue, and evcp reactors could
 # make shared use of the AIO POSIX implementation for FILE I/O based on
 # what this interface has taught me. -jvenus
-
+################################################################################
 cdef extern from "sys/time.h":
     cdef struct timespec:
         long tv_sec
@@ -89,8 +92,9 @@ cdef extern from "stdio.h":
     cdef extern void *malloc(int)
     cdef extern void free(void *)
     cdef extern int close(int)
-    # was originally used for debugging
-    cdef extern int printf(char *, ...)
+# TODO: remove later ... see below
+# was originally used for debugging
+#    cdef extern int printf(char *, ...)
 
 cdef extern from "Python.h":
     ctypedef struct PyObject
@@ -98,16 +102,17 @@ cdef extern from "Python.h":
     cdef extern PyThreadState *PyEval_SaveThread()
     cdef extern void PyEval_RestoreThread(PyThreadState*)
 
+# FIXME: remove after AIO interfaces are supported
 # NOTE: This was only used during intial development
 #   and it can probably be removed in the future.
-cdef extern void debug(object message):
-    """debug message printer"""
-    msg = "<<DEBUG>> " + str(message) + "\n"
-    cdef char *output
-    output = <bytes>msg
-    printf(output)
+#cdef extern void debug(object message):
+#    """debug message printer"""
+#    msg = "<<DEBUG>> " + str(message) + "\n"
+#    cdef char *output
+#    output = <bytes>msg
+#    printf(output)
 
-cdef class portpoll:
+cdef class ecf:
     """
     Represent a set of file descriptors being monitored for events.
 
@@ -156,9 +161,9 @@ cdef class portpoll:
         @param fd: File descriptor to modify
 
         @type events: C{int}
-        @param events: A bit set of PPOLLIN, PPOLLPRI, PPOLLOUT, PPOLLERR, 
-          PPOLLHUP, PPOLLNVAL, PPOLLNORM, PPOLLRDNORM, PPOLLWRNORM, 
-          PPOLLRDBAND, and PPOLLWRBAND.
+        @param events: A bit set of EPOLLIN, EPOLLPRI, EPOLLOUT, EPOLLERR, 
+          EPOLLHUP, EPOLLNVAL, EPOLLNORM, EPOLLRDNORM, EPOLLWRNORM, 
+          EPOLLRDBAND, and EPOLLWRBAND.
 
         @raise IOError: Raised if the underlying port_associate() call fails.
         """
@@ -197,12 +202,9 @@ cdef class portpoll:
         @type timeout: <timespec *>
         @param timeout: A required structure for the underlying api call
 
-        @type return: <unsigned int>
+        @type return: C{long}
         @return: Returns the number of pending events.
         """
-#        cdef timespec timeout
-#        timeout.tv_sec = 0
-#        timeout.tv_nsec = 0
         cdef unsigned int nget = 0
         cdef int maxevents = 0
         cdef int result
@@ -219,7 +221,7 @@ cdef class portpoll:
             raise IOError(errno, strerror(errno))
         return nget #number of pending results
 
-    def poll(self, int tv_sec, unsigned int maximum):
+    def poll(self, int tv_sec, long tv_nsec, unsigned int maximum):
         """
         Poll for an I/O event, wrap port_getn(3C).  If there are no
         events pending this method will return immediately.
@@ -234,7 +236,7 @@ cdef class portpoll:
         @type tv_sec: C{int} >= 0
         @param tv_sec: Number of seconds to wait for poll
 
-        @type tv_nsec: C{int} >= 0 [default=0]
+        @type tv_nsec: C{long} >= 0
         @param tv_nsec: Number of nanoseconds to wait for poll
 
         
@@ -242,7 +244,7 @@ cdef class portpoll:
         """
         cdef timespec timeout
         timeout.tv_sec = tv_sec
-        timeout.tv_nsec = 0
+        timeout.tv_nsec = tv_nsec
         # let's see if there is anything worth waiting for
         cdef unsigned int nget = maximum 
         # Set the max to the number we know we can get.
@@ -276,12 +278,14 @@ cdef class portpoll:
             PyEval_RestoreThread(_save)
 
             if result == -1:
+                # NOTE: Explanation borrowed from the Apache Webserver Project
                 # This confusing API can return an event at the same time
                 # that it reports EINTR or ETIME.  If that occurs, just
                 # report the event.  With EINTR, nget can be > 0 without
                 # any event, so check that portev_user was filled in.
                 if (errno != EINTR) and (errno != ETIME):
                     raise IOError(errno, strerror(errno))
+
             i = 0 #reset counter
             results = []
             for i from 0 <= i < nget:
@@ -291,28 +295,29 @@ cdef class portpoll:
                     # port_getn was probably interupted by a signal.
                     if _list[i].portev_user == <void *>-1:
                         continue
-                # repair filedescriptor representation
+
                 if _list[i].portev_source != PORT_SOURCE_FD:
                     continue
-                results.append((int(_list[i].portev_object), int(_list[i].portev_events)))
+                results.append(
+                    (int(_list[i].portev_object), int(_list[i].portev_events)))
             return results
         finally:
             free(_list)
 
 
-PPOLLIN = POLLIN
-PPOLLPRI = POLLPRI
-PPOLLOUT = POLLOUT
+EPOLLIN = POLLIN
+EPOLLPRI = POLLPRI
+EPOLLOUT = POLLOUT
 
-PPOLLERR = POLLERR   # error
-PPOLLHUP = POLLHUP   # hangup error
-PPOLLNVAL = POLLNVAL # invalid
-PPOLLNORM = POLLNORM
+EPOLLERR = POLLERR   # error
+EPOLLHUP = POLLHUP   # hangup error
+EPOLLNVAL = POLLNVAL # invalid
+EPOLLNORM = POLLNORM
 
-PPOLLRDNORM = POLLRDNORM
-PPOLLWRNORM = POLLWRNORM
-PPOLLRDBAND = POLLRDBAND
-PPOLLWRBAND = POLLWRBAND
+EPOLLRDNORM = POLLRDNORM
+EPOLLWRNORM = POLLWRNORM
+EPOLLRDBAND = POLLRDBAND
+EPOLLWRBAND = POLLWRBAND
 
 # potential sources
 PAIO = PORT_SOURCE_AIO     # struct aiocb
