@@ -246,9 +246,10 @@ pyecf_modify(pyEcf_Object *self, PyObject *args, PyObject *kwds)
     error:
     PyErr_SetFromErrno(PyExc_OSError);
     /*lose track of the selectable object on failure*/
-    if PyDict_Contains(self->descriptors, pfd)
+    if PyDict_Contains(self->descriptors, pfd) {
         PyDict_DelItem(self->descriptors, pfd);
-        Py_DECREF(pfd);
+        Py_DECREF(pfd); //FIXME is this right?
+    }
     return NULL;
 } 
 
