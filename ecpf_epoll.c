@@ -294,6 +294,20 @@ pyecf_unregister(pyEcf_Object *self, PyObject *args, PyObject *kwds)
     Py_RETURN_NONE;
 }
 
+/*FIXME finish this implementation*/
+static PyObject *
+pyecf_poll(pyEcf_Object *self, PyObject *args, PyObject *kwds)
+{
+
+}
+
+PyDoc_STRVAR(pyecf_poll_doc,
+"poll([timeout=-1[, maxevents=-1]]) -> [(fd, events), (...)]\n\
+\n\
+Wait for events on the ecp file descriptor for a maximum time of timeout\n\
+in seconds (as float). -1 makes poll wait indefinitely.\n\
+Up to maxevents are returned to the caller.");
+
 PyDoc_STRVAR(pyecf_unregister_doc,
 "unregister(fd) -> None\n\
 \n\
@@ -327,20 +341,6 @@ PyDoc_STRVAR(pyecf_doc,
 "select.epoll()\n\
 \n\
 Returns an event completion port pollable object.");
-
-/*FIXME finish this implementation*/
-static PyObject *
-pyepoll_poll(pyEpoll_Object *self, PyObject *args, PyObject *kwds)
-{
-
-}
-
-PyDoc_STRVAR(pyepoll_poll_doc,
-"poll([timeout=-1[, maxevents=-1]]) -> [(fd, events), (...)]\n\
-\n\
-Wait for events on the epoll file descriptor for a maximum time of timeout\n\
-in seconds (as float). -1 makes poll wait indefinitely.\n\
-Up to maxevents are returned to the caller.");
 
 /*make the solaris event completion framework look like linux epoll*/
 static PyTypeObject pyEcf_Type = {
