@@ -327,6 +327,7 @@ PyDoc_STRVAR(pyecf_doc,
 \n\
 Returns an event completion port pollable object.");
 
+/*FIXME finish this implementation*/
 static PyObject *
 pyepoll_poll(pyEpoll_Object *self, PyObject *args, PyObject *kwds)
 {
