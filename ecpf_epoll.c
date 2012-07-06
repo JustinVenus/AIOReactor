@@ -21,6 +21,7 @@
  */
 
 #include <port.h>
+#include <sys/time.h>
 
 /* Set one-shot behavior. After one event is pulled out, the fd is internally 
  * disabled. Solaris has this behavior by default, but as we are mimicking
@@ -298,7 +299,105 @@ pyecf_unregister(pyEcf_Object *self, PyObject *args, PyObject *kwds)
 static PyObject *
 pyecf_poll(pyEcf_Object *self, PyObject *args, PyObject *kwds)
 {
+    double dtimeout = -1.;
+    unsigned int nget = 0;
+    unsigned int maxevents = 1;
+    int result = 0;
+    int i;
+/* TODO setup timeout */
+    timespec timeout;
+    
+    if (self->ecfd < 0)
+        return pyecf_err_closed();
 
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|di:poll", kwlist,
+                                     &dtimeout, &maxevents)) {
+        return NULL;
+    }
+
+    /* The max parameter specifies the maximum number of events that 
+     * can be returned in list[]. If max is 0, the value pointed to 
+     * by nget is set to the number of events available on the port. 
+     * The port_getn() function returns immediately but no events are
+     * retrieved. So why is this important? Well it allows us to check
+     * for events and break early as opposed to waiting for a timeout.
+     */
+    Py_BEGIN_ALLOW_THREADS
+    result = port_getn(self->ecfd, NULL, 0, &nget, NULL);
+    Py_END_ALLOW_THREADS
+    /* 32-bit port_getn on Solaris 10 x86 returns a large negative value 
+     * instead of 0 when returning immediately.
+     */
+    if (result == -1) {
+        PyErr_SetFromErrno(PyExc_OSError);
+        return NULL;
+    }
+    /* if no items then set nget to maxevents */
+    if (nget == 0)
+        nget = maxevents;
+
+    port_event_t *list = PyMem_New(port_event_t*, 
+                                   sizeof(port_event_t) * nget);
+    if (list == NULL) {
+        Py_DECREF(self);
+        PyErr_NoMemory();
+        return NULL;
+    }
+
+    /* initialize user data to an invalid value for error detection */
+    Py_BEGIN_ALLOW_THREADS
+    for (i = 0; i < nget; i++)
+        list[i].portev_user = (void *)-1;
+
+    /* get all of the events */
+    result = port_getn(self->ecfd, list, nget, &nget, &timeout);
+    Py_END_ALLOW_THREADS
+
+    /* NOTE: Explanation borrowed from the Apache Webserver Project.
+     *
+     * This confusing API can return an event at the same time
+     * that it reports EINTR or ETIME.  If that occurs, just
+     * report the event.  With EINTR, nget can be > 0 without
+     * any event, so check that portev_user was filled in.
+     */
+    if (result == -1) && (errno != EINTR) && (errno != ETIME) {
+        PyErr_SetFromErrno(PyExc_OSError);
+        PyMem_Free(list); /* Notice me */
+        return NULL;
+    }
+
+    PyObject *elist = PyList_New(0), *etuple = NULL;
+    /* process the events, reschedule if not oneshot, and build tuple */
+    for (i = 0; i < nget; i++) {
+        if (list[i].portev_user == NULL)
+            continue;
+        if (list[i].portev_user == -1)
+            continue;
+        /* atm we only handle file descriptors */
+        if (list[i].portev_source != PORT_SOURCE_FD)
+            continue;
+        /* re-associate port for more events */
+        if !(list[i].portev_user & POLLONESHOT) {
+            Py_BEGIN_ALLOW_THREADS
+            /*TODO  think about how to handle this on errno*/
+            result = port_associate(self->epfd, PORT_SOURCE_FD,
+                                    list[i].portev_object, 
+                                    (unsigned int)list[i].portev_user,
+                                    list[i].portev_user);
+            Py_END_ALLOW_THREADS
+        }
+        etuple = Py_BuildValue("iI", list[i].portev_object, 
+                               list[i].events);
+        if (etuple == NULL) {
+            Py_CLEAR(elist);
+            goto error;
+        }
+        PyList_Append(elist, etuple);
+    }
+
+    error:
+    PyMem_Free(list);
+    return elist;
 }
 
 PyDoc_STRVAR(pyecf_poll_doc,
