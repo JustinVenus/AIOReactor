@@ -23,6 +23,8 @@
 #include <port.h>
 #include <sys/time.h>
 
+#define SEC2NSEC 1000000000
+
 /* Set one-shot behavior. After one event is pulled out, the fd is internally 
  * disabled. Solaris has this behavior by default, but as we are mimicking
  * epoll behavior which needs to be explicity told to one-shot.
@@ -299,13 +301,12 @@ pyecf_unregister(pyEcf_Object *self, PyObject *args, PyObject *kwds)
 static PyObject *
 pyecf_poll(pyEcf_Object *self, PyObject *args, PyObject *kwds)
 {
-    double dtimeout = -1.;
+    double dtimeout = 1.;
     unsigned int nget = 0;
     unsigned int maxevents = 1;
     int result = 0;
-    int i;
-/* TODO setup timeout */
     timespec timeout;
+    int i;
     
     if (self->ecfd < 0)
         return pyecf_err_closed();
@@ -344,6 +345,10 @@ pyecf_poll(pyEcf_Object *self, PyObject *args, PyObject *kwds)
         return NULL;
     }
 
+    /* fill in the timespec structure*/
+    timeout.tv_sec=(time_t) dtimeout;
+    timeout.tv_nsec=(dtimeout - (time_t) dtimeout) * SEC2NSEC;
+
     /* initialize user data to an invalid value for error detection */
     Py_BEGIN_ALLOW_THREADS
     for (i = 0; i < nget; i++)
@@ -377,7 +382,7 @@ pyecf_poll(pyEcf_Object *self, PyObject *args, PyObject *kwds)
         if (list[i].portev_source != PORT_SOURCE_FD)
             continue;
         /* re-associate port for more events */
-        if !(list[i].portev_user & POLLONESHOT) {
+        if (!(list[i].portev_user & POLLONESHOT)) {
             Py_BEGIN_ALLOW_THREADS
             /*TODO  think about how to handle this on errno*/
             result = port_associate(self->epfd, PORT_SOURCE_FD,
